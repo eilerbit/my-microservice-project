@@ -1,0 +1,7 @@
+lesson-5/.terraform/modules/modules.json
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
