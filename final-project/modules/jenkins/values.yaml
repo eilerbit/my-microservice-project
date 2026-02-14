@@ -1,0 +1,26 @@
+controller:
+  serviceType: LoadBalancer
+
+  installPlugins:
+    - kubernetes
+    - workflow-aggregator
+    - git
+    - configuration-as-code
+    - pipeline-stage-view
+
+  JCasC:
+    enabled: true
+    defaultConfig: true
+
+persistence:
+  enabled: false
+
+agent:
+  enabled: true
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: jenkins
