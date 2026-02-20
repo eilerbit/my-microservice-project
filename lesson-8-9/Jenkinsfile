@@ -1,0 +1,138 @@
+pipeline {
+  agent {
+    kubernetes {
+      label 'kaniko-agent'
+      defaultContainer 'jnlp'
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: jenkins
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:debug
+      tty: true
+      command:
+        - /busybox/cat
+      volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+    - name: git
+      image: alpine/git:2.45.2
+      tty: true
+      command:
+        - sh
+        - -c
+        - cat
+  volumes:
+    - name: docker-config
+      emptyDir: {}
+"""
+    }
+  }
+
+  options { timestamps() }
+
+  environment {
+    AWS_REGION   = "us-west-2"
+    ECR_REGISTRY = "177121335853.dkr.ecr.us-west-2.amazonaws.com"
+    ECR_REPO     = "lesson-8-9-django-ecr"
+
+    GIT_BRANCH   = "lesson-8-9"
+
+    VALUES_FILE  = "lesson-8-9/charts/django-app/values.yaml"
+
+    DOCKERFILE   = "Dockerfile"
+    CONTEXT_DIR  = "."
+  }
+
+  stages {
+    stage("Checkout") {
+      steps {
+        checkout scm
+        script {          
+          env.IMAGE_TAG = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+        }
+      }
+    }
+
+    stage("Build & Push to ECR (Kaniko)") {
+      steps {
+        container('kaniko') {
+          withCredentials([
+            [
+              $class: 'AmazonWebServicesCredentialsBinding',
+              credentialsId: 'aws-creds'
+            ]
+          ]) {
+            sh '''
+              set -eux
+
+              # Create docker config for ECR login
+              mkdir -p /kaniko/.docker
+
+              TOKEN=$(aws ecr get-login-password --region ${AWS_REGION})
+              AUTH=$(printf "AWS:%s" "$TOKEN" | base64 | tr -d '\n')
+
+              cat > /kaniko/.docker/config.json <<EOF
+              {
+                "auths": {
+                  "${ECR_REGISTRY}": { "auth": "${AUTH}" }
+                }
+              }
+EOF
+
+              /kaniko/executor \
+                --dockerfile=${DOCKERFILE} \
+                --context=${CONTEXT_DIR} \
+                --destination=${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG} \
+                --destination=${ECR_REGISTRY}/${ECR_REPO}:latest
+            '''
+          }
+        }
+      }
+    }
+
+    stage("Update Helm values.yaml tag + Push to Git") {
+      steps {
+        container('git') {
+          withCredentials([usernamePassword(credentialsId: 'git-push-creds', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+            sh '''
+              set -eux
+
+              git config user.email "jenkins@local"
+              git config user.name  "jenkins"
+
+              # update tag in values.yaml
+              # expects:
+              # image:
+              #   repository: ...
+              #   tag: "..."
+              sed -i -E "s#(^[[:space:]]*tag:[[:space:]]*).*$#\\1\\"${IMAGE_TAG}\\"#g" "${VALUES_FILE}"
+
+              git add "${VALUES_FILE}"
+
+              # commit only if something changed
+              if git diff --cached --quiet; then
+                echo "No changes in ${VALUES_FILE}, skip commit."
+                exit 0
+              fi
+
+              git commit -m "ci: bump image tag to ${IMAGE_TAG}"
+
+              # push using PAT
+              git remote set-url origin https://${GIT_USER}:${GIT_PAT}@github.com/eilerbit/my-microservice-project.git
+              git push origin HEAD:${GIT_BRANCH}
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "Done. Image tag: ${IMAGE_TAG}. ArgoCD should auto-sync from branch ${GIT_BRANCH}."
+    }
+  }
+}
